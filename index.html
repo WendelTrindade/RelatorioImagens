@@ -114,7 +114,7 @@
 
   <!-- App Header -->
   <header class="app-header no-print">
-    <h1>🛡️ GUARDIÃO IMAGENS <span class="version-badge" id="appVersionDisplay">v2.4.1</span></h1>
+    <h1>🛡️ GUARDIÃO IMAGENS <span class="version-badge" id="appVersionDisplay">v2.4.2</span></h1>
     <small id="headerCompanyDisplay">SERVIÇOS DE QUALIDADE</small>
   </header>
 
@@ -636,7 +636,7 @@ function(t){t.__bidiEngine__=t.prototype.__bidiEngine__=function(t){var n,r,i,a,
 </script>
 
   <script>
-    const APP_VERSION = "v2.4.1";
+    const APP_VERSION = "v2.4.2";
     const EMPRESA = "GUARDIÃO SERVIÇOS DE QUALIDADE";
     const EMPRESA_SUBTITULO = "SERVIÇOS DE QUALIDADE";
 
@@ -714,6 +714,76 @@ function(t){t.__bidiEngine__=t.prototype.__bidiEngine__=function(t){var n,r,i,a,
       localStorage.setItem('guardiao_cfg_v2', JSON.stringify(config));
     }
 
+
+    /* ORDEM DAS FOTOS: sempre na sequência em que foram tiradas */
+    function lerDataExif(buf) {
+      try {
+        const v = new DataView(buf);
+        if (v.getUint16(0) !== 0xFFD8) return null;
+        let p = 2;
+        while (p + 4 < v.byteLength) {
+          const marker = v.getUint16(p);
+          if (marker === 0xFFDA || marker < 0xFF00) break;
+          const len = v.getUint16(p + 2);
+          if (marker === 0xFFE1 && v.getUint32(p + 4) === 0x45786966) {
+            const t = p + 10;
+            const le = v.getUint16(t) === 0x4949;
+            const g16 = (o) => v.getUint16(t + o, le);
+            const g32 = (o) => v.getUint32(t + o, le);
+            const lerTexto = (o, n) => { let r = ''; for (let i = 0; i < n; i++) { const c = v.getUint8(t + o + i); if (!c) break; r += String.fromCharCode(c); } return r; };
+            const acharTag = (ifd, tag) => {
+              const n = g16(ifd);
+              for (let i = 0; i < n; i++) {
+                const e = ifd + 2 + i * 12;
+                if (g16(e) === tag) return { tipo: g16(e + 2), qtd: g32(e + 4), valor: e + 8 };
+              }
+              return null;
+            };
+            const ifd0 = g32(4);
+            let dataTxt = null, sub = '';
+            const exifPtr = acharTag(ifd0, 0x8769);
+            if (exifPtr) {
+              const ifdExif = g32(exifPtr.valor);
+              const d = acharTag(ifdExif, 0x9003) || acharTag(ifdExif, 0x9004);
+              if (d) dataTxt = lerTexto(g32(d.valor), d.qtd);
+              const ss = acharTag(ifdExif, 0x9291);
+              if (ss) sub = ss.qtd <= 4 ? lerTexto(ss.valor, ss.qtd) : lerTexto(g32(ss.valor), ss.qtd);
+            }
+            if (!dataTxt) {
+              const d = acharTag(ifd0, 0x0132);
+              if (d) dataTxt = lerTexto(g32(d.valor), d.qtd);
+            }
+            if (!dataTxt) return null;
+            const m = dataTxt.match(/^(\d{4}):(\d{2}):(\d{2}) (\d{2}):(\d{2}):(\d{2})/);
+            if (!m || m[1] === '0000') return null;
+            const ms = sub ? parseInt((sub.trim() + '000').slice(0, 3), 10) || 0 : 0;
+            return new Date(+m[1], +m[2] - 1, +m[3], +m[4], +m[5], +m[6]).getTime() + ms;
+          }
+          p += 2 + len;
+        }
+      } catch (e) { /* ignora e usa a data do arquivo */ }
+      return null;
+    }
+
+    async function ordenarFotosPelaCaptura(arquivos) {
+      const collator = new Intl.Collator('pt-BR', { numeric: true, sensitivity: 'base' });
+      const itens = await Promise.all(arquivos.map(async (file, i) => {
+        let quando = null;
+        try {
+          const buf = await file.slice(0, 262144).arrayBuffer();
+          quando = lerDataExif(buf);
+        } catch (e) { quando = null; }
+        if (quando === null) quando = file.lastModified || 0;
+        return { file, quando, i };
+      }));
+      itens.sort((a, b) => {
+        if (a.quando !== b.quando) return a.quando - b.quando;
+        const porNome = collator.compare(a.file.name || '', b.file.name || '');
+        return porNome !== 0 ? porNome : a.i - b.i;
+      });
+      return itens.map(x => x.file);
+    }
+
     function handleFileSelection(event) {
       selectedFiles = Array.from(event.target.files);
       const badge = document.getElementById('fileCountBadge');
@@ -770,12 +840,13 @@ function(t){t.__bidiEngine__=t.prototype.__bidiEngine__=function(t){var n,r,i,a,
 
       // Processamento em Paralelo para agilizar bastante a estampa
       let count = 0;
-      const processPromises = selectedFiles.map(async (file) => {
+      const arquivosOrdenados = await ordenarFotosPelaCaptura(selectedFiles);
+      const processPromises = arquivosOrdenados.map(async (file) => {
         const stampedBase64 = await applyStampToImage(file, type, identifier, priority, timestamp, location);
         count++;
-        const percent = Math.round((count / selectedFiles.length) * 100);
+        const percent = Math.round((count / arquivosOrdenados.length) * 100);
         progressBarFill.style.width = percent + '%';
-        progressText.innerText = `Processando imagens ${percent}% (${count}/${selectedFiles.length})`;
+        progressText.innerText = `Processando imagens ${percent}% (${count}/${arquivosOrdenados.length})`;
         return {
           id: 'img_' + Date.now() + '_' + Math.random().toString(36).substr(2, 4),
           data: stampedBase64
@@ -1066,8 +1137,9 @@ function(t){t.__bidiEngine__=t.prototype.__bidiEngine__=function(t){var n,r,i,a,
     }
 
     async function appendPhotosToRecord(event, recordId) {
-      const files = Array.from(event.target.files);
-      if (files.length === 0) return;
+      const filesBrutos = Array.from(event.target.files);
+      if (filesBrutos.length === 0) return;
+      const files = await ordenarFotosPelaCaptura(filesBrutos);
 
       const progressWrapper = document.getElementById('progressWrapper');
       const progressBarFill = document.getElementById('progressBarFill');
